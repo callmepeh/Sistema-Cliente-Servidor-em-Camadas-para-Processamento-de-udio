@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Ambiente
+.env
+
+# Armazenamento do servidor (arquivos de áudio enviados)
+server/storage/
+
+# Docs: manter os diretórios com .gitkeep
+!docs/prints/.gitkeep
+!docs/videos/.gitkeep
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
