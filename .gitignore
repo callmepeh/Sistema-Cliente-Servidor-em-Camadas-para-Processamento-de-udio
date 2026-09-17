@@ -11,6 +11,7 @@ venv/
 
 # Armazenamento do servidor (arquivos de áudio enviados)
 server/storage/
+/storage/
 
 # Docs: manter os diretórios com .gitkeep
 !docs/prints/.gitkeep
