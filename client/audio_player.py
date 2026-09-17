@@ -6,7 +6,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QUrl, Qt, Signal, QPointF
+from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -22,9 +23,14 @@ from PySide6.QtWidgets import (
 def extract_pcm(source: str | Path, tmp_wav: Path) -> bool:
     """Converte qualquer áudio para PCM WAV mono 8kHz para análise de waveform."""
     try:
+        from ffmpeg_path import resolve_binary
+    except ImportError:
+        from .ffmpeg_path import resolve_binary
+
+    try:
         subprocess.run(
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                resolve_binary("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(source),
                 "-ac", "1", "-ar", "8000",
                 "-c:a", "pcm_s16le",
@@ -174,15 +180,16 @@ class AudioPlayerWidget(QWidget):
         self.stop()
         self._current_label = label or source
         self.status.setText(f"Carregando: {self._current_label}")
-
-        self._player.setSource(QUrl(source))
-        self._player.play()
-
-        # Waveform: só para arquivos locais
+        self.status.setStyleSheet("color: #8892a8;")
         self.waveform.set_peaks([])
-        p = Path(source) if not source.startswith("http") else None
-        if p and p.exists():
-            self._render_local_waveform(p)
+
+        local = Path(source)
+        if local.exists():
+            self._player.setSource(QUrl.fromLocalFile(str(local.resolve())))
+            self._render_local_waveform(local)
+        else:
+            self._player.setSource(QUrl(source))
+        self._player.play()
 
     def play_local_file(self, path: str | Path, label: str = "") -> None:
         self.play_file(Path(path).resolve().as_uri(), label)
