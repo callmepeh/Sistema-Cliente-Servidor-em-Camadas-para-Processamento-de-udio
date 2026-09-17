@@ -29,6 +29,10 @@ class TestSystem:
         resp = client.get("/", follow_redirects=False)
         assert resp.status_code in (301, 302, 307)
 
+    def test_swagger_docs(self, client):
+        resp = client.get("/api/docs")
+        assert resp.status_code == 200
+
 
 @pytest.mark.usefixtures("client")
 class TestUploadAndProcessing:
@@ -69,6 +73,26 @@ class TestUploadAndProcessing:
         shutil_rmtree = __import__("shutil").rmtree
         target = storage.audio_dir(resp.json()["id"])
         shutil_rmtree(target, ignore_errors=True)
+
+    def test_processed_mime_after_convert(self, client, sample_wav):
+        with open(sample_wav, "rb") as f:
+            resp = client.post(
+                "/api/audios",
+                files={"file": ("sample.wav", f, "audio/wav")},
+                data={
+                    "processing_type": "convert",
+                    "processing_params": '{"target_format": "mp3"}',
+                },
+            )
+        assert resp.status_code == 201, resp.text
+        audio_id = resp.json()["id"]
+        media = client.get(f"/api/audios/{audio_id}/processed")
+        assert media.status_code == 200
+        assert media.headers["content-type"].startswith("audio/mpeg")
+
+        from server.app import storage
+        shutil_rmtree = __import__("shutil").rmtree
+        shutil_rmtree(storage.audio_dir(audio_id), ignore_errors=True)
 
     def test_upload_invalid_processing_type(self, client, sample_wav):
         with open(sample_wav, "rb") as f:
@@ -165,3 +189,11 @@ class TestDelete:
         # limpa
         import shutil
         shutil.rmtree(trash_item, ignore_errors=True)
+
+
+def test_atempo_chain_covers_ffmpeg_limits():
+    from server.app.processing import _atempo_chain
+
+    assert _atempo_chain(1.5) == "atempo=1.5"
+    assert _atempo_chain(4.0) == "atempo=2.0,atempo=2.0"
+    assert _atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
