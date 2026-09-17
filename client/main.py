@@ -29,16 +29,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:
-    from .api_client import ApiError, AudioApiClient
-    from .audio_player import AudioPlayerWidget
-    from .env_utils import load_env
-    from .ffmpeg_path import resolve_binary
-except ImportError:
-    from api_client import ApiError, AudioApiClient
-    from audio_player import AudioPlayerWidget
-    from env_utils import load_env
-    from ffmpeg_path import resolve_binary
+import sys
+
+_CLIENT_DIR = Path(__file__).resolve().parent
+if str(_CLIENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CLIENT_DIR))
+
+from api_client import ApiError, AudioApiClient
+from audio_player import AudioPlayerWidget
+from env_utils import load_env
+from ffmpeg_path import resolve_binary
 
 load_env()
 

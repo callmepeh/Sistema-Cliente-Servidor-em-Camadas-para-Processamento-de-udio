@@ -1,11 +1,10 @@
 """Player de áudio com QMediaPlayer e widget de waveform (desenhada localmente)."""
 from __future__ import annotations
 
+import array
 import subprocess
 import wave
 from pathlib import Path
-
-import numpy as np
 from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -55,15 +54,16 @@ def read_wav_peaks(path: Path, buckets: int = 600) -> list[float]:
             sw = w.getsampwidth()
             if sw != 2:
                 return [0.0] * buckets
-            samples = np.frombuffer(raw, dtype=np.int16)
+            samples = array.array("h")
+            samples.frombytes(raw)
             if ch > 1:
                 samples = samples[::ch]
             step = max(1, len(samples) // buckets)
             peaks = []
             for i in range(0, len(samples), step):
-                chunk = samples[i:i + step].astype(np.float32) / 32768.0
-                if len(chunk):
-                    peaks.append(float(np.max(np.abs(chunk))))
+                chunk = samples[i:i + step]
+                if chunk:
+                    peaks.append(max(abs(s) for s in chunk) / 32768.0)
             if not peaks:
                 return [0.0] * buckets
             m = max(peaks) or 1.0
