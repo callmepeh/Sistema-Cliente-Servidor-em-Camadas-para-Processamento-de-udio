@@ -15,6 +15,27 @@ class ApiError(RuntimeError):
         self.status_code = status_code
 
 
+class _ProgressReader:
+    """File-like que reporta bytes lidos sem expor fileno() (evita bypass do callback)."""
+
+    def __init__(self, raw, total: int, callback):
+        self._raw = raw
+        self._total = max(total, 1)
+        self._callback = callback
+        self._sent = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._raw.read(size)
+        if data:
+            self._sent += len(data)
+            if self._callback:
+                self._callback(min(self._sent, self._total), self._total)
+        return data
+
+    def __len__(self) -> int:
+        return self._total
+
+
 class AudioApiClient:
     """Encapsula as chamadas HTTP para o servidor."""
 
@@ -71,22 +92,22 @@ class AudioApiClient:
         if processing_params:
             data["processing_params"] = json.dumps(processing_params)
 
-        sent = {"n": 0}
-
-        def _monitor(chunk: bytes):
-            sent["n"] += len(chunk)
-            if progress_cb:
-                progress_cb(sent["n"], total)
+        if progress_cb:
+            progress_cb(0, total)
 
         with open(path, "rb") as f:
+            reader = _ProgressReader(f, total, progress_cb)
             try:
                 r = self._client.post(
                     f"{self.base_url}/api/audios",
-                    files={"file": (path.name, f, "application/octet-stream")},
+                    files={"file": (path.name, reader, "application/octet-stream")},
                     data=data,
                 )
             except httpx.HTTPError as exc:
                 raise ApiError(f"Falha no upload: {exc}") from exc
+
+        if progress_cb:
+            progress_cb(total, total)
 
         if r.status_code >= 400:
             detail = ""
@@ -128,6 +149,7 @@ class AudioApiClient:
         """Baixa um arquivo (original ou processado) para o disco."""
         url = self.stream_url(audio_id, kind)
         dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             with self._client.stream("GET", url) as r:
                 r.raise_for_status()
@@ -140,6 +162,15 @@ class AudioApiClient:
 
     def waveform_url(self, audio_id: str) -> str:
         return f"{self.base_url}/api/audios/{audio_id}/waveform"
+
+    def fetch_waveform(self, audio_id: str) -> bytes:
+        """Baixa os bytes da imagem waveform.png."""
+        try:
+            r = self._client.get(self.waveform_url(audio_id))
+            r.raise_for_status()
+            return r.content
+        except httpx.HTTPError as exc:
+            raise ApiError(f"Falha ao obter waveform: {exc}") from exc
 
     def delete_audio(self, audio_id: str) -> None:
         r = self._client.delete(f"{self.base_url}/api/audios/{audio_id}")

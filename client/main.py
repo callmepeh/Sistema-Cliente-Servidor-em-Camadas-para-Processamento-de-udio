@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QPixmap
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -29,14 +29,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from api_client import ApiError, AudioApiClient
-from audio_player import AudioPlayerWidget
-
-# Suporta execução como módulo (-m client.main) ou script direto
 try:
+    from .api_client import ApiError, AudioApiClient
+    from .audio_player import AudioPlayerWidget
     from .env_utils import load_env
+    from .ffmpeg_path import resolve_binary
 except ImportError:
+    from api_client import ApiError, AudioApiClient
+    from audio_player import AudioPlayerWidget
     from env_utils import load_env
+    from ffmpeg_path import resolve_binary
 
 load_env()
 
@@ -99,6 +101,32 @@ class HistoryWorker(QThread):
             self.failed.emit(f"Erro inesperado: {exc}")
 
 
+class FileWorker(QThread):
+    """Baixa original/processado em background para o cache local."""
+
+    finished_ok = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, api: AudioApiClient, audio_id: str, kind: str, dest: str, label: str):
+        super().__init__()
+        self.api = api
+        self.audio_id = audio_id
+        self.kind = kind
+        self.dest = dest
+        self.label = label
+
+    def run(self):
+        try:
+            dest = Path(self.dest)
+            if not dest.exists() or dest.stat().st_size == 0:
+                self.api.download(self.audio_id, self.kind, dest)
+            self.finished_ok.emit(str(dest), self.label)
+        except ApiError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"Erro inesperado: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -108,6 +136,7 @@ class MainWindow(QMainWindow):
         self.api: AudioApiClient | None = None
         self.upload_worker: UploadWorker | None = None
         self.history_worker: HistoryWorker | None = None
+        self.file_worker: FileWorker | None = None
         self.current_record: dict | None = None
         self._temp_dir = Path(tempfile.gettempdir()) / "audio_client_cache"
         self._temp_dir.mkdir(exist_ok=True)
@@ -202,6 +231,7 @@ class MainWindow(QMainWindow):
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
+        self.progress.setTextVisible(True)
         left_layout.addWidget(self.progress)
 
         left_layout.addStretch(1)
@@ -238,6 +268,9 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.itemSelectionChanged.connect(self._on_history_select)
         hist_layout.addWidget(self.table)
+        self.btn_delete = QPushButton("Excluir selecionado")
+        self.btn_delete.clicked.connect(self._on_delete)
+        hist_layout.addWidget(self.btn_delete)
         right_layout.addWidget(history_group, 1)
 
         splitter.addWidget(right)
@@ -306,7 +339,11 @@ class MainWindow(QMainWindow):
     def _on_processing_changed(self):
         key = self.cmb_processing.currentData()
         if key and key in PARAM_HINTS:
-            self.txt_params.setPlaceholderText(PARAM_HINTS[key])
+            hint = PARAM_HINTS[key]
+            self.txt_params.setPlaceholderText(hint)
+            current = self.txt_params.text().strip()
+            if not current or current in PARAM_HINTS.values():
+                self.txt_params.setText("" if hint == "{}" else hint)
 
     def _browse_file(self):
         formats = " ".join(f"*{e}" for e in (".wav .mp3 .ogg .flac .m4a .aac .opus .wma".split()))
@@ -330,7 +367,11 @@ class MainWindow(QMainWindow):
             import subprocess
 
             out = subprocess.run(
-                ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
+                [
+                    resolve_binary("ffprobe"),
+                    "-v", "error", "-print_format", "json",
+                    "-show_format", "-show_streams", path,
+                ],
                 capture_output=True, text=True, check=True, timeout=15,
             )
             data = json.loads(out.stdout)
@@ -369,7 +410,9 @@ class MainWindow(QMainWindow):
 
         self.btn_upload.setEnabled(False)
         self.progress.setVisible(True)
+        self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setFormat("Enviando... %p%")
 
         self.upload_worker = UploadWorker(self.api, path, key, params)
         self.upload_worker.progress.connect(self._on_upload_progress)
@@ -378,11 +421,20 @@ class MainWindow(QMainWindow):
         self.upload_worker.start()
 
     def _on_upload_progress(self, sent: int, total: int):
-        if total > 0:
-            self.progress.setValue(int(sent * 100 / total))
+        if total <= 0:
+            return
+        if sent >= total:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("Processando no servidor...")
+            return
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(sent * 100 / total))
+        self.progress.setFormat("Enviando... %p%")
 
     def _on_upload_ok(self, record: dict):
         self.progress.setVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setFormat("%p%")
         self.btn_upload.setEnabled(True)
         self.current_record = record
         QMessageBox.information(
@@ -394,6 +446,8 @@ class MainWindow(QMainWindow):
 
     def _on_upload_fail(self, msg: str):
         self.progress.setVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setFormat("%p%")
         self.btn_upload.setEnabled(True)
         QMessageBox.critical(self, "Falha no envio", msg)
 
@@ -444,24 +498,63 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Player", "Selecione um áudio no histórico.")
             return
         rec = self.current_record
-        url = self.api.stream_url(rec["id"], kind)
+        if kind == "original":
+            ext = rec.get("original_ext") or "bin"
+        else:
+            processed = rec.get("path_processed") or ""
+            ext = Path(processed).suffix.lstrip(".") or rec.get("original_ext") or "bin"
+        dest = self._temp_dir / f"{rec['id']}_{kind}.{ext}"
         label = f"{rec.get('original_name', '')} ({'original' if kind == 'original' else 'processado'})"
-        self.player.play_file(url, label)
+        self.player.status.setText("Baixando áudio...")
+        if self.file_worker is not None:
+            try:
+                self.file_worker.finished_ok.disconnect()
+                self.file_worker.failed.disconnect()
+            except RuntimeError:
+                pass
+        self.file_worker = FileWorker(self.api, rec["id"], kind, str(dest), label)
+        self.file_worker.finished_ok.connect(self.player.play_file)
+        self.file_worker.failed.connect(lambda msg: QMessageBox.critical(self, "Player", msg))
+        self.file_worker.start()
 
     def _show_waveform(self):
         if not self.api or not self.current_record:
             QMessageBox.information(self, "Waveform", "Selecione um áudio no histórico.")
             return
         rec = self.current_record
-        url = self.api.waveform_url(rec["id"])
+        try:
+            data = self.api.fetch_waveform(rec["id"])
+        except ApiError as exc:
+            QMessageBox.warning(self, "Waveform", str(exc))
+            return
+        pixmap = QPixmap()
         dlg = QMessageBox(self)
         dlg.setWindowTitle(f"Waveform — {rec.get('original_name', '')}")
-        pixmap = QPixmap()
-        if pixmap.load(url):
+        if pixmap.loadFromData(data):
             dlg.setIconPixmap(pixmap.scaledToWidth(560, Qt.TransformationMode.SmoothTransformation))
         else:
             dlg.setText("Não foi possível carregar a waveform.")
         dlg.exec()
+
+    def _on_delete(self):
+        if not self.api or not self.current_record:
+            QMessageBox.information(self, "Excluir", "Selecione um áudio no histórico.")
+            return
+        rec = self.current_record
+        confirm = QMessageBox.question(
+            self,
+            "Excluir",
+            f"Mover '{rec.get('original_name', rec.get('id'))}' para a lixeira do servidor?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.api.delete_audio(rec["id"])
+        except ApiError as exc:
+            QMessageBox.critical(self, "Excluir", str(exc))
+            return
+        self.current_record = None
+        self.refresh_history()
 
     def _show_about(self):
         QMessageBox.about(
