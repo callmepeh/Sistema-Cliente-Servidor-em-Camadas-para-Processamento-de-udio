@@ -1,9 +1,10 @@
 """Utilidades de FFmpeg: sondagem de metadados e execução de filtros."""
 import json
+import os
+import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
-
-from .config import settings
 
 # Extensões e MIME types aceitos
 SUPPORTED_EXTENSIONS = {
@@ -17,8 +18,42 @@ SUPPORTED_EXTENSIONS = {
     ".wma": "audio/x-ms-wma",
 }
 
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+
+@lru_cache(maxsize=4)
+def resolve_binary(name: str) -> str:
+    """Localiza ffmpeg/ffprobe no PATH, em variáveis de ambiente ou no WinGet."""
+    found = shutil.which(name)
+    if found:
+        return found
+
+    env_value = os.environ.get(f"{name.upper()}_PATH") or os.environ.get("FFMPEG_BIN")
+    if env_value:
+        p = Path(env_value)
+        if p.is_dir():
+            candidate = p / (f"{name}.exe" if os.name == "nt" else name)
+            if candidate.exists():
+                return str(candidate)
+        elif p.exists():
+            return str(p)
+
+    localapp = os.environ.get("LOCALAPPDATA", "")
+    if localapp:
+        packages = Path(localapp) / "Microsoft" / "WinGet" / "Packages"
+        if packages.is_dir():
+            exe_name = f"{name}.exe" if os.name == "nt" else name
+            for pkg in packages.glob("Gyan.FFmpeg*"):
+                matches = sorted(pkg.glob(f"ffmpeg-*/bin/{exe_name}"))
+                if matches:
+                    return str(matches[0])
+    return name
+
+
+def ffmpeg_bin() -> str:
+    return resolve_binary("ffmpeg")
+
+
+def ffprobe_bin() -> str:
+    return resolve_binary("ffprobe")
 
 
 class FFmpegError(RuntimeError):
@@ -28,7 +63,7 @@ class FFmpegError(RuntimeError):
 def probe_audio(path: str | Path) -> dict:
     """Extrai metadados do áudio via ffprobe (JSON)."""
     cmd = [
-        FFPROBE,
+        ffprobe_bin(),
         "-v", "error",
         "-print_format", "json",
         "-show_format",
@@ -61,9 +96,9 @@ def probe_audio(path: str | Path) -> dict:
 
 def run_ffmpeg(args: list[str], timeout: int = 300) -> None:
     """Executa um comando ffmpeg e lança erro em caso de falha."""
-    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *args]
+    cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
     except subprocess.CalledProcessError as exc:
         raise FFmpegError(f"ffmpeg falhou: {exc.stderr.strip()}") from exc
     except FileNotFoundError as exc:

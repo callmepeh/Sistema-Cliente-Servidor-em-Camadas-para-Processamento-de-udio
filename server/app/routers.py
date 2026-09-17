@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from . import service
 from .database import get_db
-from .ffmpeg_utils import SUPPORTED_EXTENSIONS
+from .ffmpeg_utils import SUPPORTED_EXTENSIONS, ffmpeg_bin, get_mime_type
 from .models import Audio
 from .processing import PROCESSING_TYPES
 from .schemas import (
@@ -43,11 +43,12 @@ def health(db: Session = Depends(get_db)):
 
     ffmpeg_status = "ok"
     try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True, timeout=10)
+        subprocess.run([ffmpeg_bin(), "-version"], capture_output=True, check=True, timeout=10)
     except Exception:
         ffmpeg_status = "erro"
 
-    return HealthResponse(status="ok", database=db_status, ffmpeg=ffmpeg_status)
+    overall = "ok" if db_status == "ok" and ffmpeg_status == "ok" else "erro"
+    return HealthResponse(status=overall, database=db_status, ffmpeg=ffmpeg_status)
 
 
 @router.get("/processing-types", response_model=list[ProcessingInfo], tags=["Sistema"])
@@ -134,7 +135,7 @@ def download_processed(audio_id: str, db: Session = Depends(get_db)):
     path = Path(audio.path_processed)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Arquivo processado não encontrado em disco")
-    return FileResponse(path, media_type=audio.mime_type, filename=path.name)
+    return FileResponse(path, media_type=get_mime_type(path.name), filename=path.name)
 
 
 @router.get("/audios/{audio_id}/waveform", tags=["Áudios"])

@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .ffmpeg_utils import FFmpegError, run_ffmpeg
+from .ffmpeg_utils import FFmpegError, probe_audio
 
 
 @dataclass
@@ -70,18 +70,29 @@ class Speed(ProcessingType):
             raise FFmpegError("Fator de velocidade deve estar entre 0.25 e 4.0")
         keep_pitch = bool(params.get("preserving_pitch", True))
         if keep_pitch:
-            # atempo aceita entre 0.5 e 2.0 por instância; encadeia se necessário
-            if factor <= 2.0:
-                af = f"atempo={factor}"
-            else:
-                af = f"atempo=2.0,atempo={factor / 2.0}"
+            af = _atempo_chain(factor)
         else:
-            af = f"asetrate=44100*{factor},aresample=44100"
+            sr = probe_audio(input_path).get("sample_rate") or 44100
+            af = f"asetrate={sr}*{factor},aresample={sr}"
         return [
             "-i", str(input_path),
             "-af", af,
             str(output_path),
         ]
+
+
+def _atempo_chain(factor: float) -> str:
+    """atempo só aceita 0.5–2.0; encadeia filtros para fatores fora dessa faixa."""
+    parts: list[str] = []
+    remaining = factor
+    while remaining > 2.0 + 1e-9:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5 - 1e-9:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    parts.append(f"atempo={remaining}")
+    return ",".join(parts)
 
 
 @dataclass

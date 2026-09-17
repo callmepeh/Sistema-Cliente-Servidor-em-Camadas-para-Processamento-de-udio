@@ -33,6 +33,9 @@ def create_app() -> "FastAPI":
             "Envie arquivos, aplique processamentos FFmpeg e consulte o histórico."
         ),
         version="1.0.0",
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_url="/api/openapi.json",
     )
 
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
